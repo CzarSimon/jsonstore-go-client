@@ -18,18 +18,18 @@ var (
 	ErrNoValue      = errors.New("No value for key")
 )
 
-// Client interface for client implementations.
+// Client interface for jsonstore client implementations.
 type Client interface {
-	Get(path string, v interface{}) error
-	GetBytes(path string) ([]byte, error)
+	Get(key string, v interface{}) error // Done
+	GetBytes(key string) ([]byte, error) // Done
 
-	Post(path string, v interface{}) error
-	PostBytes(path string, data []byte) error
+	Post(key string, v interface{}) error    // Done
+	PostBytes(key string, data []byte) error // Done
 
-	Put(path string, v interface{}) error
-	PutBytes(path string, data []byte) error
+	Put(key string, v interface{}) error
+	PutBytes(key string, data []byte) error
 
-	Delete(path string) error
+	Delete(key string) error
 }
 
 // HttpClient main http client for interacting with jsonstore.
@@ -54,10 +54,28 @@ func NewClient(storeKey string) *HttpClient {
 	}
 }
 
-// GetBytes performs a get request and returns the response as a byte array.
-func (c *HttpClient) GetBytes(path string) ([]byte, error) {
-	url := c.createURL(path)
-	req, err := newRequest(http.MethodGet, url, nil)
+// Get gets value from jsonstore.
+func (c *HttpClient) Get(key string, v interface{}) error {
+	rawResponse, err := c.GetBytes(key)
+	if err != nil {
+		return err
+	}
+	resp, err := newResponse(rawResponse)
+	if err != nil {
+		return err
+	}
+	if resp.Result == nil {
+		return ErrNoValue
+	}
+	if !resp.OK {
+		return fmt.Errorf("Could not get resource '%s'", key)
+	}
+	return resp.unmarshallResult(v)
+}
+
+// GetBytes gets value from jsonstore as a bytes.
+func (c *HttpClient) GetBytes(key string) ([]byte, error) {
+	req, err := newRequest(http.MethodGet, c.createURL(key), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -72,48 +90,72 @@ func (c *HttpClient) GetBytes(path string) ([]byte, error) {
 	return ioutil.ReadAll(resp.Body)
 }
 
-// PostBytes stores given data with path as a key.
-func (c *HttpClient) PostBytes(path string, data []byte) error {
-	req, err := newRequest(http.MethodPost, c.createURL(path), bytes.NewBuffer(data))
+// Post posts a value in jsonstore.
+func (c *HttpClient) Post(key string, v interface{}) error {
+	body, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	resp, err := c.httpClient.Do(req)
+	return c.PostBytes(key, body)
+}
+
+// PostBytes posts raw bytes to jsonstore.
+func (c *HttpClient) PostBytes(key string, data []byte) error {
+	req, err := newRequest(http.MethodPost, c.createURL(key), bytes.NewBuffer(data))
 	if err != nil {
 		return err
+	}
+	_, err = c.performRequest(key, req)
+	return err
+}
+
+// Put updates the value of a given key in jsonstore.
+func (c *HttpClient) Put(key string, v interface{}) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return c.PutBytes(key, body)
+}
+
+// PutBytes updates the value of a given key in jsonstore.
+func (c *HttpClient) PutBytes(key string, data []byte) error {
+	req, err := newRequest(http.MethodPut, c.createURL(key), bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	_, err = c.performRequest(key, req)
+	return err
+}
+
+// Delete deletes the value of a key in jsonstore.
+func (c *HttpClient) Delete(key string) error {
+	req, err := newRequest(http.MethodDelete, c.createURL(key), nil)
+	if err != nil {
+		return err
+	}
+	_, err = c.performRequest(key, req)
+	return err
+}
+
+func (c *HttpClient) performRequest(key string, r *http.Request) (*Response, error) {
+	resp, err := c.httpClient.Do(r)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Non OK status: %d", resp.StatusCode)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("Non OK status: %d", resp.StatusCode)
 	}
 	var storeResp Response
 	err = json.NewDecoder(resp.Body).Decode(&storeResp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !storeResp.OK {
-		return fmt.Errorf("Failed to store resource at '%s'", path)
+		return nil, fmt.Errorf("Failed to store resource at '%s'", key)
 	}
-	return nil
-}
-
-// Get gets the value for a given key and deserializes the result into a holder.
-func (c *HttpClient) Get(path string, v interface{}) error {
-	rawResponse, err := c.GetBytes(path)
-	if err != nil {
-		return err
-	}
-	resp, err := newResponse(rawResponse)
-	if err != nil {
-		return err
-	}
-	if resp.Result == nil {
-		return ErrNoValue
-	}
-	if !resp.OK {
-		return fmt.Errorf("Could not get resource '%s'", path)
-	}
-	return resp.unmarshallResult(v)
+	return &storeResp, nil
 }
 
 func (c *HttpClient) createURL(resourcePath string) string {
@@ -125,7 +167,7 @@ func (c *HttpClient) createURL(resourcePath string) string {
 func (resp *Response) unmarshallResult(v interface{}) error {
 	bytes, err := json.Marshal(resp.Result)
 	if err != nil {
-		return nil
+		return err
 	}
 	return json.Unmarshal(bytes, v)
 }
@@ -151,6 +193,7 @@ func newRequest(method, url string, body io.Reader) (*http.Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-type", "application/json")
+	req.Header.Add("Accept", "application/json")
+	req.Header.Add("Content-type", "application/json")
 	return req, nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/CzarSimon/jsonstore-go-client/jsonstore"
@@ -14,12 +15,74 @@ const (
 	AddCommand      = "add"
 	CompleteCommand = "complete"
 	DeleteCommand   = "delete"
+	HelpCommand     = "help"
 	TodoKey         = "todos"
 )
 
 type Env struct {
-	db       *jsonstore.HttpClient
-	metadata Metadata
+	jsonstore jsonstore.Client
+	metadata  Metadata
+}
+
+func (env *Env) nextId() int {
+	nextId := env.metadata.NextId
+	err := env.jsonstore.Put("metadata/nextId", nextId+1)
+	if err == nil {
+		env.metadata.NextId = nextId + 1
+	}
+	return nextId
+}
+
+func (env *Env) addTodo() error {
+	title, err := getCommandAt(2)
+	if err != nil {
+		return errors.New("No todo title provided")
+	}
+	todoId := env.nextId()
+	todo := NewTodo(todoId, title)
+	err = env.jsonstore.Post(fmt.Sprintf("todos/%d", todoId), todo)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Todo: '%s' added\n", title)
+	return nil
+}
+
+func (env *Env) listTodos() error {
+	todos := make([]Todo, 0)
+	err := env.jsonstore.Get("todos", &todos)
+	if err != nil {
+		return err
+	}
+	for _, todo := range filterTodos(todos) {
+		fmt.Println(todo)
+	}
+	return nil
+}
+
+func (env *Env) completeTodo() error {
+	ID := getIdFromArgs()
+	err := env.jsonstore.Put(fmt.Sprintf("todos/%d/done", ID), true)
+	if err != nil {
+		return err
+	}
+	var todo Todo
+	err = env.jsonstore.Get(fmt.Sprintf("todos/%d", ID), &todo)
+	if err != nil {
+		fmt.Printf("Todo with id %d set to done\n", ID)
+	}
+	fmt.Printf("'%s' set to done\n", todo.Title)
+	return nil
+}
+
+func (env *Env) deleteTodo() error {
+	ID := getIdFromArgs()
+	err := env.jsonstore.Delete(fmt.Sprintf("todos/%d", ID))
+	if err != nil {
+		return err
+	}
+	fmt.Println("Todo deleted")
+	return nil
 }
 
 func getEnv() *Env {
@@ -31,8 +94,8 @@ func getEnv() *Env {
 		os.Exit(1)
 	}
 	return &Env{
-		db:       db,
-		metadata: metadata,
+		jsonstore: db,
+		metadata:  metadata,
 	}
 }
 
@@ -46,22 +109,29 @@ func getStoreToken() string {
 }
 
 func main() {
-	_ = getEnv()
-	subCommand, err := getSubCommand()
+	env := getEnv()
+	subCommand, err := getCommandAt(1)
 	if err != nil {
-		fmt.Println(err)
+		subCommand = ListCommand
+		err = nil
 	}
 	switch subCommand {
 	case ListCommand:
-		fmt.Println(subCommand)
+		err = env.listTodos()
 	case AddCommand:
-		fmt.Println(subCommand)
+		err = env.addTodo()
 	case CompleteCommand:
-		fmt.Println(subCommand)
+		err = env.completeTodo()
 	case DeleteCommand:
-		fmt.Println(subCommand)
-	default:
+		err = env.deleteTodo()
+	case HelpCommand:
 		printHelp()
+	default:
+		fmt.Printf("Unknown command: '%s'\n", subCommand)
+		printHelp()
+	}
+	if err != nil {
+		fmt.Println(err)
 	}
 }
 
@@ -72,15 +142,28 @@ type Todo struct {
 	Date  time.Time `json:"date"`
 }
 
+func (todo Todo) String() string {
+	return fmt.Sprintf("%d - %s", todo.ID, todo.Title)
+}
+
+func NewTodo(id int, title string) Todo {
+	return Todo{
+		ID:    id,
+		Title: title,
+		Done:  false,
+		Date:  time.Now(),
+	}
+}
+
 type Metadata struct {
 	NextId int `json:"nextId"`
 }
 
-func getSubCommand() (string, error) {
-	if len(os.Args) < 2 {
-		return "", errors.New("No subcommand provided")
+func getCommandAt(index int) (string, error) {
+	if len(os.Args) < index+1 {
+		return "", fmt.Errorf("No command at index: %d provided", index)
 	}
-	return os.Args[1], nil
+	return os.Args[index], nil
 }
 
 func printHelp() {
@@ -89,4 +172,28 @@ func printHelp() {
 	fmt.Printf("%s      - adds a new todo\n", AddCommand)
 	fmt.Printf("%s - marks a todo as completed\n", CompleteCommand)
 	fmt.Printf("%s   - deletes a todo\n", DeleteCommand)
+}
+
+func getIdFromArgs() int {
+	idStr, err := getCommandAt(2)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	ID, err := strconv.Atoi(idStr)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	return ID
+}
+
+func filterTodos(todos []Todo) []Todo {
+	filteredTodos := make([]Todo, 0)
+	for _, todo := range todos {
+		if !todo.Done && todo.Title != "" {
+			filteredTodos = append(filteredTodos, todo)
+		}
+	}
+	return filteredTodos
 }
